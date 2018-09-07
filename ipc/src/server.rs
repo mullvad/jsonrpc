@@ -19,6 +19,12 @@ use select_with_weak::SelectWithWeakExt;
 use parity_tokio_ipc::Endpoint;
 pub use parity_tokio_ipc::SecurityAttributes;
 
+use tokio;
+use tokio::reactor::Handle;
+use tokio::executor::Executor;
+use futures;
+
+
 /// IPC server session
 pub struct Service<M: Metadata = (), S: Middleware<M> = NoopMiddleware> {
 	handler: Arc<MetaIoHandler<M, S>>,
@@ -63,7 +69,6 @@ pub struct ServerBuilder<M: Metadata = (), S: Middleware<M> = NoopMiddleware> {
 	handler: Arc<MetaIoHandler<M, S>>,
 	meta_extractor: Arc<MetaExtractor<M>>,
 	session_stats: Option<Arc<session::SessionStats>>,
-	remote: reactor::UninitializedRemote,
 	incoming_separator: codecs::Separator,
 	outgoing_separator: codecs::Separator,
 	security_attributes: SecurityAttributes,
@@ -88,17 +93,10 @@ impl<M: Metadata, S: Middleware<M>> ServerBuilder<M, S> {
 			handler: Arc::new(io_handler.into()),
 			meta_extractor: Arc::new(extractor),
 			session_stats: None,
-			remote: reactor::UninitializedRemote::Unspawned,
 			incoming_separator: codecs::Separator::Empty,
 			outgoing_separator: codecs::Separator::default(),
 			security_attributes: SecurityAttributes::empty(),
 		}
-	}
-
-	/// Sets shared different event loop remote.
-	pub fn event_loop_remote(mut self, remote: Remote) -> Self {
-		self.remote = reactor::UninitializedRemote::Shared(remote);
-		self
 	}
 
 	/// Sets session metadata extractor.
@@ -129,20 +127,21 @@ impl<M: Metadata, S: Middleware<M>> ServerBuilder<M, S> {
 	}
 
 	/// Creates a new server from the given endpoint.
-	pub fn start(self, path: &str) -> std::io::Result<Server> {
-		let remote = self.remote.initialize()?;
+	pub fn start(self, path: &str) -> std::io::Result<(impl Future<Item=(), Error=()>,
+	oneshot::Receiver<Option<std::io::Error>>, Server)> {
+
 		let rpc_handler = self.handler;
 		let endpoint_addr = path.to_owned();
 		let meta_extractor = self.meta_extractor;
 		let session_stats = self.session_stats;
 		let incoming_separator = self.incoming_separator;
 		let outgoing_separator = self.outgoing_separator;
-		let (stop_signal, stop_receiver) = oneshot::channel();
 		let (start_signal, start_receiver) = oneshot::channel();
+		let (stop_signal, stop_receiver) = oneshot::channel();
 		let (wait_signal, wait_receiver) = oneshot::channel();
 		let security_attributes = self.security_attributes;
 
-		remote.remote().spawn(move |handle| {
+		let future = futures::future::lazy(move || {
 
 			let mut endpoint = Endpoint::new(endpoint_addr);
 			endpoint.set_security_attributes(security_attributes);
@@ -154,16 +153,15 @@ impl<M: Metadata, S: Middleware<M>> ServerBuilder<M, S> {
 				}
 			}
 
-			let endpoint_handle = handle.clone();
-			let connections = match endpoint.incoming(endpoint_handle) {
+			let connections = match endpoint.incoming(&Handle::current()) {
 				Ok(connections) => connections,
 				Err(e) => {
-					start_signal.send(Err(e)).expect("Cannot fail since receiver never dropped before receiving");
-					return future::Either::A(future::ok(()));
+					error!("failed with: {}", e);
+					start_signal.send(Some(e));
+					return future::Either::A(future::err(()));
 				}
 			};
 
-			let remote = handle.remote().clone();
 			let mut id = 0u64;
 
 			let server = connections.for_each(move |(io_stream, remote_id)| {
@@ -205,11 +203,11 @@ impl<M: Metadata, S: Middleware<M>> ServerBuilder<M, S> {
 					Ok(())
 				});
 
-				remote.spawn(|_| writer);
+				tokio::spawn(writer);
 
 				Ok(())
 			});
-			start_signal.send(Ok(())).expect("Cannot fail since receiver never dropped before receiving");
+			start_signal.send(None).expect("failed to signal start");
 
 			let stop = stop_receiver.map_err(|_| std::io::ErrorKind::Interrupted.into());
 			future::Either::B(
@@ -223,18 +221,14 @@ impl<M: Metadata, S: Middleware<M>> ServerBuilder<M, S> {
 		});
 
 		let handle = InnerHandles {
-						remote: Some(remote),
 						stop: Some(stop_signal),
 						path: path.to_owned(),
 		};
 
-		match start_receiver.wait().expect("Message should always be sent") {
-			Ok(()) => Ok(Server {
+			Ok((future, start_receiver, Server {
 							handles: Arc::new(Mutex::new(handle)),
 							wait_handle: Some(wait_receiver),
-			}),
-			Err(e) => Err(e)
-		}
+			}))
 	}
 }
 
@@ -269,7 +263,6 @@ impl Server {
 
 #[derive(Debug)]
 struct InnerHandles {
-	remote: Option<reactor::Remote>,
 	stop: Option<oneshot::Sender<()>>,
 	path: String,
 }
@@ -277,7 +270,6 @@ struct InnerHandles {
 impl InnerHandles {
 	pub fn close(&mut self) {
 		let _ = self.stop.take().map(|stop| stop.send(()));
-		self.remote.take().map(|remote| remote.close());
 		let _ = ::std::fs::remove_file(&self.path); // ignore error, file could have been gone somewhere
 	}
 }
@@ -319,6 +311,8 @@ mod tests {
 	use tokio_core::reactor::{Timeout, Core};
 	use meta::{MetaExtractor, RequestContext, NoopExtractor};
 	use super::SecurityAttributes;
+	use tokio;
+	use tokio::executor::Executor;
 
 	fn server_builder() -> ServerBuilder {
 		let mut io = MetaIoHandler::<()>::default();
@@ -330,7 +324,14 @@ mod tests {
 
 	fn run(path: &str) -> Server {
 		let builder = server_builder();
-		let server = builder.start(path).expect("Server must run with no issues");
+		let (fut, start, server) = builder.start(path).expect("Server must run with no issues");
+		thread::spawn(move ||{
+			let mut rt = tokio::runtime::Runtime::new().unwrap();
+			rt.spawn(fut);
+			rt.shutdown_on_idle().wait().unwrap();
+		});
+		start.wait();
+
 		server
 	}
 
@@ -362,8 +363,11 @@ mod tests {
 		});
 		let server = ServerBuilder::new(io);
 
-		let _server = server.start("/tmp/test-ipc-20000")
+		let (fut,start, handles) = server.start("/tmp/test-ipc-20000")
 			.expect("Server must run with no issues");
+		thread::spawn(move||{tokio::run(fut);});
+		assert!(start.wait().unwrap().is_none());
+		handles.close();
 	}
 
 	#[test]
@@ -477,8 +481,10 @@ mod tests {
 		});
 		let builder = ServerBuilder::new(io);
 
-		let server = builder.start(path).expect("Server must run with no issues");
+		let (fut, start, server) = builder.start(path).expect("Server must run with no issues");
 		let (stop_signal, stop_receiver) = oneshot::channel();
+		thread::spawn(move|| tokio::run(fut));
+		assert!(start.wait().unwrap().is_none());
 
 		let t = thread::spawn(move || {
 			let result = dummy_request_str(
@@ -537,7 +543,9 @@ mod tests {
 
 		let io = MetaIoHandler::<Arc<SessionEndMeta>>::default();
 		let builder = ServerBuilder::with_meta_extractor(io, session_metadata_extractor);
-		let server = builder.start(path).expect("Server must run with no issues");
+		let (fut, start, server) = builder.start(path).expect("Server must run with no issues");
+		thread::spawn(move || tokio::run(fut));
+		assert!(start.wait().unwrap().is_none());
 		{
 			let _ = UnixStream::connect(path).wait().expect("Socket should connect");
 		}
