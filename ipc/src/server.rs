@@ -6,11 +6,10 @@ use std::sync::Arc;
 use tokio_service::{self, Service as TokioService};
 use jsonrpc::futures::{future, Future, Stream, Sink};
 use jsonrpc::futures::sync::{mpsc, oneshot};
-use jsonrpc::{FutureResult, Metadata, MetaIoHandler, Middleware, NoopMiddleware};
+use jsonrpc::{Metadata, MetaIoHandler, Middleware, NoopMiddleware};
 
-use server_utils::tokio_core::reactor::Remote;
 use server_utils::tokio_io::AsyncRead;
-use server_utils::{reactor, session, codecs};
+use server_utils::{session, codecs};
 
 use parking_lot::Mutex;
 
@@ -21,7 +20,6 @@ pub use parity_tokio_ipc::SecurityAttributes;
 
 use tokio;
 use tokio::reactor::Handle;
-use tokio::executor::Executor;
 use futures;
 
 
@@ -157,7 +155,7 @@ impl<M: Metadata, S: Middleware<M>> ServerBuilder<M, S> {
 				Ok(connections) => connections,
 				Err(e) => {
 					error!("failed with: {}", e);
-					start_signal.send(Some(e));
+					let _ = start_signal.send(Some(e));
 					return future::Either::A(future::err(()));
 				}
 			};
