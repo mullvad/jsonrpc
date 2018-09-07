@@ -36,13 +36,25 @@ impl<M: Metadata, S: Middleware<M>> tokio_service::Service for Service<M, S> {
 	type Request = String;
 	type Response = Option<String>;
 
-	type Error = ();
+	type Error = std::io::Error;
 
-	type Future = FutureResult<S::Future>;
+	type Future = Box<Future<Item=Self::Response,Error=Self::Error> + Send>;
 
 	fn call(&self, req: Self::Request) -> Self::Future {
 		trace!(target: "ipc", "Received request: {}", req);
-		self.handler.handle_request(&req, self.meta.clone())
+		let fut = self.handler
+			.handle_request(&req, self.meta.clone())
+			.then(|result| {
+				match result {
+					Err(_) => {
+						future::ok(None)
+					}
+					Ok(some_result) => future::ok(some_result),
+				}
+			})
+			.map_err(|_:()| std::io::ErrorKind::Other.into());
+
+		Box::new(fut)
 	}
 }
 
@@ -174,21 +186,11 @@ impl<M: Metadata, S: Middleware<M>> ServerBuilder<M, S> {
 						outgoing_separator.clone(),
 					)
 				).split();
-				let responses = reader.and_then(move |req| {
-					service.call(req).then(move |response| match response {
-						Err(e) => {
-							warn!(target: "ipc", "Error while processing request: {:?}", e);
-							future::ok(None)
-						},
-						Ok(None) => {
-							future::ok(None)
-						},
-						Ok(Some(response_data)) => {
-							trace!(target: "ipc", "Sent response: {}", &response_data);
-							future::ok(Some(response_data))
-						}
-					})
+				let responses = reader
+					.map(move |req| {
+					service.call(req)
 				})
+				.buffer_unordered(1024)
 				.filter_map(|x| x)
 				// we use `select_with_weak` here, instead of `select`, to close the stream
 				// as soon as the ipc pipe is closed
