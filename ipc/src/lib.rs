@@ -6,6 +6,8 @@ extern crate jsonrpc_server_utils as server_utils;
 extern crate parity_tokio_ipc;
 extern crate tokio_service;
 extern crate parking_lot;
+extern crate tokio;
+extern crate futures;
 
 pub extern crate jsonrpc_core;
 
