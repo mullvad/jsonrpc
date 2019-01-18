@@ -72,34 +72,71 @@ macro_rules! metadata {
 
 #[macro_export]
 macro_rules! build_rpc_trait {
-	// entry-point. todo: make another for traits w/ bounds.
 	(
 		$(#[$t_attr: meta])*
-		pub trait $name: ident $(<$($generics:ident),*>)* {
+		pub trait $name:ident $(<$( $generics:ident ),*>
+		$(
+			where
+				$( $generics2:ident : $bounds:tt $( + $morebounds:tt )* ,)+
+		)* )*
+		{
+			$( $rest: tt )+
+		}
+	) => {
+		build_rpc_trait! {
+			@WITH_BOUNDS
+			$(#[$t_attr])*
+			pub trait $name $(<
+				// first generic parameters with both bounds
+				$( $generics ,)*
+				@BOUNDS
+				// then specialised ones
+				$( $( $generics2 : $bounds $( + $morebounds )* )* )*
+			> )* {
+				$( $rest )+
+			}
+		}
+	};
+
+	// entry-point. todo: make another for traits w/ bounds.
+	(
+		@WITH_BOUNDS
+		$(#[$t_attr: meta])*
+		pub trait $name:ident $(<
+			$( $simple_generics:ident ,)*
+			@BOUNDS
+			$( $generics:ident $(: $bounds:tt $( + $morebounds:tt )* )* ),*
+		>)* {
 			$(
 				$( #[doc=$m_doc:expr] )*
 				#[ rpc( $($t:tt)* ) ]
-				fn $m_name: ident ( $($p: tt)* ) -> $result: tt <$out: ty $(, $error: ty)* >;
+				fn $m_name: ident ( $( $p: tt )* ) -> $result: tt <$out: ty $(, $error: ty)* >;
 			)*
 		}
 	) => {
 		$(#[$t_attr])*
-		pub trait $name $(<$($generics,)*>)* : Sized + Send + Sync + 'static {
-			$(
-				$(#[doc=$m_doc])*
-				fn $m_name ( $($p)* ) -> $result<$out $(, $error)* > ;
-			)*
+		pub trait $name $(<$( $simple_generics ,)* $( $generics , )*>)* : Sized + Send + Sync + 'static {
+			build_rpc_trait!(
+				GENERATE_FUNCTIONS
+				$(
+					$(#[doc=$m_doc])*
+					fn $m_name ( $( $p )* ) -> $result <$out $(, $error) *>;
+				)*
+			);
 
 			/// Transform this into an `IoDelegate`, automatically wrapping
 			/// the parameters.
 			fn to_delegate<M: $crate::jsonrpc_core::Metadata>(self) -> $crate::IoDelegate<Self, M>
-				where $($($generics: Send + Sync + 'static + $crate::Serialize + $crate::DeserializeOwned),*)*
+				where $(
+					$($simple_generics: Send + Sync + 'static + $crate::Serialize + $crate::DeserializeOwned ,)*
+					$($generics: Send + Sync + 'static $( + $bounds $( + $morebounds )* )* ),*
+				)*
 			{
 				let mut del = $crate::IoDelegate::new(self.into());
 				$(
 					build_rpc_trait!(WRAP del =>
 						( $($t)* )
-						fn $m_name ( $($p)* ) -> $result <$out $(, $error)* >
+						fn $m_name ( $( $p )* ) -> $result <$out $(, $error)* >
 					);
 				)*
 				del
@@ -109,14 +146,19 @@ macro_rules! build_rpc_trait {
 
 	// entry-point for trait with metadata methods
 	(
+		@WITH_BOUNDS
 		$(#[$t_attr: meta])*
-		pub trait $name: ident $(<$($generics:ident),*>)* {
+		pub trait $name: ident $(<
+			$( $simple_generics:ident ,)*
+			@BOUNDS
+			$($generics:ident $( : $bounds:tt $( + $morebounds:tt )* )* ),*
+		>)* {
 			type Metadata;
 
 			$(
 				$( #[ doc=$m_doc:expr ] )*
 				#[ rpc( $($t:tt)* ) ]
-				fn $m_name: ident ( $($p: tt)* ) -> $result: tt <$out: ty $(, $error_std: ty) *>;
+				fn $m_name: ident ( $( $p: tt )* ) -> $result: tt <$out: ty $(, $error_std: ty) *>;
 			)*
 
 			$(
@@ -133,34 +175,41 @@ macro_rules! build_rpc_trait {
 		}
 	) => {
 		$(#[$t_attr])*
-		pub trait $name $(<$($generics,)*>)* : Sized + Send + Sync + 'static {
+		pub trait $name $(<$( $simple_generics ,)* $( $generics , )* >)* : Sized + Send + Sync + 'static {
 			// Metadata bound differs for traits with subscription methods.
 			metadata! (
 				$( $sub_name )*
 			);
 
-			$(
-				$(#[doc=$m_doc])*
-				fn $m_name ( $($p)* ) -> $result <$out $(, $error_std) *>;
-			)*
+			build_rpc_trait!(GENERATE_FUNCTIONS
+				$(
+					$(#[doc=$m_doc])*
+					fn $m_name ( $( $p )* ) -> $result <$out $(, $error_std) *>;
+				)*
+			);
 
-			$(
-				$(#[doc=$sub_doc])*
-				fn $sub_name ( $($sub_p)* );
-				$(#[doc=$unsub_doc])*
-				fn $unsub_name ( $($unsub_p)* ) -> $sub_result <$sub_out $(, $error_unsub)* >;
-			)*
+			build_rpc_trait!(GENERATE_FUNCTIONS
+				$(
+					$(#[doc=$sub_doc])*
+					fn $sub_name ( $( $sub_p )* );
+					$(#[doc=$unsub_doc])*
+					fn $unsub_name ( $( $unsub_p )* ) -> $sub_result <$sub_out $(, $error_unsub) *>;
+				)*
+			);
 
 			/// Transform this into an `IoDelegate`, automatically wrapping
 			/// the parameters.
 			fn to_delegate(self) -> $crate::IoDelegate<Self, Self::Metadata>
-				where $($($generics: Send + Sync + 'static + $crate::Serialize + $crate::DeserializeOwned),*)*
+				where $(
+					$($simple_generics: Send + Sync + 'static + $crate::Serialize + $crate::DeserializeOwned ),*
+					$($generics: Send + Sync + 'static $( + $bounds $( + $morebounds )* )* ),*
+				)*
 			{
 				let mut del = $crate::IoDelegate::new(self.into());
 				$(
 					build_rpc_trait!(WRAP del =>
 						( $($t)* )
-						fn $m_name ( $($p)* ) -> $result <$out $(, $error_std)* >
+						fn $m_name ( $( $p )* ) -> $result <$out $(, $error_std)* >
 					);
 				)*
 				$(
@@ -177,17 +226,15 @@ macro_rules! build_rpc_trait {
 		}
 	};
 
-	( WRAP $del: expr =>
-		(name = $name: expr $(, alias = [ $( $alias: expr, )+ ])*)
-		fn $method: ident (&self $(, $param: ty)*) -> $result: tt <$out: ty $(, $error: ty)* >
-	) => {
-		$del.add_method($name, move |base, params| {
-			$crate::WrapAsync::wrap_rpc(&(Self::$method as fn(&_ $(, $param)*) -> $result <$out $(, $error)*>), base, params)
-		});
+	(GENERATE_FUNCTIONS
 		$(
-			$(
-				$del.add_alias($alias, $name);
-			)+
+			$( #[doc=$m_doc:expr] )*
+			fn $m_name: ident (&self $(, $p: ty)* ) $( -> $result: ty)*;
+		)*
+	) => {
+		$(
+			$(#[doc=$m_doc])*
+			fn $m_name (&self $(, _: $p )* ) $( -> $result)*;
 		)*
 	};
 
@@ -240,6 +287,20 @@ macro_rules! build_rpc_trait {
 			$(
 				$del.add_alias($unsub_alias, $unsubscribe);
 			)*
+		)*
+	};
+
+	( WRAP $del: expr =>
+		(name = $name: expr $(, alias = [ $( $alias: expr, )+ ])*)
+		fn $method: ident (&self $(, $param: ty)*) -> $result: tt <$out: ty $(, $error: ty)* >
+	) => {
+		$del.add_method($name, move |base, params| {
+			$crate::WrapAsync::wrap_rpc(&(Self::$method as fn(&_ $(, $param)*) -> $result <$out $(, $error)*>), base, params)
+		});
+		$(
+			$(
+				$del.add_alias($alias, $name);
+			)+
 		)*
 	};
 }
@@ -642,4 +703,3 @@ wrap_with_trailing!(4, A, B, C, D);
 wrap_with_trailing!(3, A, B, C);
 wrap_with_trailing!(2, A, B);
 wrap_with_trailing!(1, A);
-
