@@ -109,6 +109,7 @@ macro_rules! build_rpc_trait {
 		>)* {
 			$(
 				$( #[doc=$m_doc:expr] )*
+				$( #[cfg $m_cfg:tt] )*
 				#[ rpc( $($t:tt)* ) ]
 				fn $m_name: ident ( $( $p: tt )* ) -> $result: tt <$out: ty $(, $error: ty)* >;
 			)*
@@ -120,6 +121,7 @@ macro_rules! build_rpc_trait {
 				GENERATE_FUNCTIONS
 				$(
 					$(#[doc=$m_doc])*
+					$(#[cfg $m_cfg])*
 					fn $m_name ( $( $p )* ) -> $result <$out $(, $error) *>;
 				)*
 			);
@@ -135,6 +137,7 @@ macro_rules! build_rpc_trait {
 				let mut del = $crate::IoDelegate::new(self.into());
 				$(
 					build_rpc_trait!(WRAP del =>
+						$(#[cfg $m_cfg])*
 						( $($t)* )
 						fn $m_name ( $( $p )* ) -> $result <$out $(, $error)* >
 					);
@@ -157,11 +160,13 @@ macro_rules! build_rpc_trait {
 
 			$(
 				$( #[ doc=$m_doc:expr ] )*
+				$( #[ cfg $m_cfg:tt ] )*
 				#[ rpc( $($t:tt)* ) ]
 				fn $m_name: ident ( $( $p: tt )* ) -> $result: tt <$out: ty $(, $error_std: ty) *>;
 			)*
 
 			$(
+				$( #[ cfg $pubsub_cfg:tt ] )*
 				#[ pubsub( $($pubsub_t:tt)+ ) ] {
 					$( #[ doc= $sub_doc:expr ] )*
 					#[ rpc( $($sub_t:tt)* ) ]
@@ -184,6 +189,7 @@ macro_rules! build_rpc_trait {
 			build_rpc_trait!(GENERATE_FUNCTIONS
 				$(
 					$(#[doc=$m_doc])*
+					$(#[cfg $m_cfg])*
 					fn $m_name ( $( $p )* ) -> $result <$out $(, $error_std) *>;
 				)*
 			);
@@ -191,8 +197,10 @@ macro_rules! build_rpc_trait {
 			build_rpc_trait!(GENERATE_FUNCTIONS
 				$(
 					$(#[doc=$sub_doc])*
+					$(#[cfg $pubsub_cfg])*
 					fn $sub_name ( $( $sub_p )* );
 					$(#[doc=$unsub_doc])*
+					$(#[cfg $pubsub_cfg])*
 					fn $unsub_name ( $( $unsub_p )* ) -> $sub_result <$sub_out $(, $error_unsub) *>;
 				)*
 			);
@@ -208,12 +216,14 @@ macro_rules! build_rpc_trait {
 				let mut del = $crate::IoDelegate::new(self.into());
 				$(
 					build_rpc_trait!(WRAP del =>
+						$(#[cfg $m_cfg])*
 						( $($t)* )
 						fn $m_name ( $( $p )* ) -> $result <$out $(, $error_std)* >
 					);
 				)*
 				$(
 					build_rpc_trait!(WRAP del =>
+						$(#[cfg $pubsub_cfg])*
 						pubsub: ( $($pubsub_t)* )
 						subscribe: ( $($sub_t)* )
 						fn $sub_name ( $($sub_p)* );
@@ -229,79 +239,93 @@ macro_rules! build_rpc_trait {
 	(GENERATE_FUNCTIONS
 		$(
 			$( #[doc=$m_doc:expr] )*
+			$( #[cfg $m_cfg:tt] )*
 			fn $m_name: ident (&self $(, $p: ty)* ) $( -> $result: ty)*;
 		)*
 	) => {
 		$(
 			$(#[doc=$m_doc])*
+			$(#[cfg $m_cfg])*
 			fn $m_name (&self $(, _: $p )* ) $( -> $result)*;
 		)*
 	};
 
 	( WRAP $del: expr =>
+		$(#[cfg $cfg_attr:tt])*
 		(meta, name = $name: expr $(, alias = [ $( $alias: expr, )+ ])*)
 		fn $method: ident (&self, Self::Metadata $(, $param: ty)*) -> $result: tt <$out: ty $(, $error: ty)* >
 	) => {
-		$del.add_method_with_meta($name, move |base, params, meta| {
-			$crate::WrapMeta::wrap_rpc(&(Self::$method as fn(&_, Self::Metadata $(, $param)*) -> $result <$out $(, $error)* >), base, params, meta)
-		});
-		$(
+		$(#[cfg $cfg_attr])*
+		{
+			$del.add_method_with_meta($name, move |base, params, meta| {
+				$crate::WrapMeta::wrap_rpc(&(Self::$method as fn(&_, Self::Metadata $(, $param)*) -> $result <$out $(, $error)* >), base, params, meta)
+			});
 			$(
-				$del.add_alias($alias, $name);
-			)+
-		)*
+				$(
+					$del.add_alias($alias, $name);
+				)+
+			)*
+		}
 	};
 
 	( WRAP $del: expr =>
+		$(#[cfg $cfg_attr:tt])*
 		pubsub: (name = $name: expr)
 		subscribe: (name = $subscribe: expr $(, alias = [ $( $sub_alias: expr, )+ ])*)
 		fn $sub_method: ident (&self, Self::Metadata $(, $sub_p: ty)+);
 		unsubscribe: (name = $unsubscribe: expr $(, alias = [ $( $unsub_alias: expr, )+ ])*)
 		fn $unsub_method: ident (&self $(, $unsub_p: ty)+) -> $result: tt <$out: ty $(, $error_unsub: ty)* >;
 	) => {
-		$del.add_subscription(
-			$name,
-			($subscribe, move |base, params, meta, subscriber| {
-				$crate::WrapSubscribe::wrap_rpc(
-					&(Self::$sub_method as fn(&_, Self::Metadata $(, $sub_p)*)),
-					base,
-					params,
-					meta,
-					subscriber,
-				)
-			}),
-			($unsubscribe, move |base, id| {
-				use $crate::jsonrpc_core::futures::{IntoFuture, Future};
-				Self::$unsub_method(base, id).into_future()
-					.map($crate::to_value)
-					.map_err(Into::into)
-			}),
-		);
+		$(#[cfg $cfg_attr])*
+		{
+			$del.add_subscription(
+				$name,
+				($subscribe, move |base, params, meta, subscriber| {
+					$crate::WrapSubscribe::wrap_rpc(
+						&(Self::$sub_method as fn(&_, Self::Metadata $(, $sub_p)*)),
+						base,
+						params,
+						meta,
+						subscriber,
+					)
+				}),
+				($unsubscribe, move |base, id| {
+					use $crate::jsonrpc_core::futures::{IntoFuture, Future};
+					Self::$unsub_method(base, id).into_future()
+						.map($crate::to_value)
+						.map_err(Into::into)
+				}),
+			);
 
-		$(
 			$(
-				$del.add_alias($sub_alias, $subscribe);
+				$(
+					$del.add_alias($sub_alias, $subscribe);
+				)*
 			)*
-		)*
-		$(
 			$(
-				$del.add_alias($unsub_alias, $unsubscribe);
+				$(
+					$del.add_alias($unsub_alias, $unsubscribe);
+				)*
 			)*
-		)*
+		}
 	};
 
 	( WRAP $del: expr =>
+		$(#[cfg $cfg_attr:tt])*
 		(name = $name: expr $(, alias = [ $( $alias: expr, )+ ])*)
 		fn $method: ident (&self $(, $param: ty)*) -> $result: tt <$out: ty $(, $error: ty)* >
 	) => {
-		$del.add_method($name, move |base, params| {
-			$crate::WrapAsync::wrap_rpc(&(Self::$method as fn(&_ $(, $param)*) -> $result <$out $(, $error)*>), base, params)
-		});
-		$(
+		$(#[cfg $cfg_attr])*
+		{
+			$del.add_method($name, move |base, params| {
+				$crate::WrapAsync::wrap_rpc(&(Self::$method as fn(&_ $(, $param)*) -> $result <$out $(, $error)*>), base, params)
+			});
 			$(
-				$del.add_alias($alias, $name);
-			)+
-		)*
+				$(
+					$del.add_alias($alias, $name);
+				)+
+			)*
+		}
 	};
 }
 
