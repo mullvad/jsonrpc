@@ -13,7 +13,7 @@ log = "0.4"
 tokio-service = "0.1"
 jsonrpc-core = { version = "8.0", path = "../core" }
 jsonrpc-server-utils = { version = "8.0", path = "../server-utils" }
-parity-tokio-ipc = { git = "https://github.com/nikvolf/parity-tokio-ipc", branch = "master" }
+parity-tokio-ipc = { git = "https://github.com/nikvolf/parity-tokio-ipc", rev = "5196f7b191b8d294a9df52178835aae422330d29" }
 parking_lot = "0.6"
 tokio = "0.1"
 futures = "0.1"
